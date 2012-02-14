@@ -1,0 +1,99 @@
+/**
+ * =====================================================================================
+ *
+ *       Filename:  linux设备模型初探-probe是如何被调用的（4）
+ *
+ *    Description:  device_register 时 probe 是如何被调用的
+ *
+ *        Version:  1.0
+ *        Created:  02/14/2012 07:57:12 PM
+ *       Revision:  none
+ *       Compiler:  gcc
+ *
+ *         Author:  yjl (scorpionfish), scorpionfish.yjl@gmail.com
+ *                  https://github.com/scorpionfish/scorpionfish_blog
+ *        Company:  
+ *
+ * =====================================================================================
+ */
+
+看完 bus_register, driver_register，好奇之下看看 device_register 是否会于 probe 有关
+/**
+ * device_register - register a device with the system.
+ * @dev: pointer to the device structure
+ *
+ * This happens in two clean steps - initialize the device
+ * and add it to the system. The two steps can be called
+ * separately, but this is the easiest and most common.
+ * I.e. you should only call the two helpers separately if
+ * have a clearly defined need to use and refcount the device
+ * before it is added to the hierarchy.
+ *
+ * NOTE: _Never_ directly free @dev after calling this function, even
+ * if it returned an error! Always use put_device() to give up the
+ * reference initialized in this function instead.
+ */
+int device_register(struct device *dev)
+{
+	device_initialize(dev);		// init device structure
+	return device_add(dev);
+}
+
+函数很简单，两行。 device_initialize， 很明显是对设备进行初始化的，虽然从函数名看，可能不会调用 probe，但为了进行确认，还是需要快速浏览一下其内部实现
+跟进去就发现其只是对 kobject、list、lock、pm 等进行初始化，确认木有调用 probe。
+ok，那就只剩下 device_add 了。
+
+根据对 bus_register, driver_register 分析的经验，可以先浏览整个函数，直接略过进行初始化、赋值等操作的函数、语句，从而缩小范围
+所以在 device_add 中被调用的 device_private_init、dev_set_name、get_device、setup_parent、set_dev_node 等函数直接跳过，kobject_add（kobject 相关的操作，不涉及 probe 调用）、platform_notify（notify platform of device entry）、device_create_file、device_create_sys_dev_entry、devtmpfs_create_node、device_add_class_symlinks（sysfs 创建文件相关的操作，也不会调用 probe），不管是从之前的分析经验，还是从函数名初步判定，这些函数都与 probe 调用无关，直接跳过
+
+刚切到看 kernel src 的 vim 中，窗外一亮———— 闪电……
+接下来的 device_add_attrs，分析 bus_register 时遇到过 bus_add_attrs，只是添加一些属性，所以这儿的这个操作应该类似，跳过先
+bus_add_device(dev);
+driver_register 是在 bus_add_driver 函数里逐层调用到 probe 的，此时的这个函数……（其实浏览整个函数内部实现的时候，一眼就能看到这个函数，一个类似 bus_add_driver 的函数，也就是极有可能调用 probe 的函数，所以可以直接优先分析这个函数）
+
+/**
+ * bus_add_device - add device to bus
+ * @dev: device being added
+ *
+ * - Add device's bus attributes.
+ * - Create links to device's bus.
+ * - Add the device to its bus's list of devices.
+ */
+int bus_add_device(struct device *dev)
+跟进去之后浏览一遍…… ？只有 attrs 和 sysfs 相关的操作？ 是跟踪跳转错误？还是判断错误？
+再次确认跟踪跳转木有问题，确实只有 attrs 和 sysfs 相关的操作 ==> bus_add_device 里木有 probe 调用 #- -
+难道 device_register 不会调用 probe ？ 此时下结论还为时尚早，还有后续的函数木有跟进去调查呢
+
+回溯到 device_add，继续往下看
+dpm_sysfs_add（）、device_pm_add（）、blocking_notifier_call_chain（）、kobject_uevent（）直接跳过
+bus_probe_device ……
+== 函数名中有 probe……，莫非 device_register 也会调用 probe，而且就是在这个函数里调用的？ 跟进
+
+/**
+ * bus_probe_device - probe drivers for a new device
+ * @dev: device to probe
+ *
+ * - Automatically probe for a driver if the bus allows it.
+ */
+void bus_probe_device(struct device *dev)
+{
+	struct bus_type *bus = dev->bus;
+	int ret;
+
+	if (bus && bus->p->drivers_autoprobe) {
+		ret = device_attach(dev);
+		WARN_ON(ret < 0);
+	}
+}
+从内核代码注释中，可以明确得知：probe drivers for a new device。
+不过仅仅知道这儿调用了 probe 是不够的，不但要知其然，更要知其所以然，还要知道 probe 是怎么被调用的
+
+drivers_autoprobe 这个变量应该已经不陌生了（分析 driver_register 时也遇到同样的调用判定），那么接下来的 device_attach 很明显就是调用 probe 的地儿了（废话，除过这儿就木有其他地儿调用了撒 #- -）,而且与 driver_attach 如此相似……
+跟进 device_attach，只有两个函数需要关注：
+device_bind_driver(dev)
+bus_for_each_drv(dev->bus, NULL, dev, __device_attach)
+
+看到 bus_for_each_drv 就不用继续往下跟了， 分析 driver_register 时已经跟进去分析过一回了，就不累赘了
+至于 device_bind_driver，其实就是通过 klist、knode 将 devices 和 driver 关联起来，从而知道 device 使用的是哪个 driver， 也可以知道 driver 可以操作哪些 devices。由于此处不涉及 probe 调用，此处就不罗嗦了，以后需要的时候再进行说明（此乃后话也）。
+
+

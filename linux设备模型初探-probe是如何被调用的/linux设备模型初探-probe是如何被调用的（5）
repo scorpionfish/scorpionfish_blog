@@ -1,0 +1,39 @@
+/**
+ * =====================================================================================
+ *
+ *       Filename:  linux设备模型初探-probe是如何被调用的（5）
+ *
+ *    Description:  summary
+ *
+ *        Version:  1.0
+ *        Created:  02/14/2012 10:58:35 PM
+ *       Revision:  none
+ *       Compiler:  gcc
+ *
+ *         Author:  yjl (scorpionfish), scorpionfish.yjl@gmail.com
+ *                  https://github.com/scorpionfish/scorpionfish_blog
+ *        Company:  
+ *
+ * =====================================================================================
+ */
+
+罗哩罗嗦写了这么多，其实无非就是看看 bus_register, driver_register, device_register 是否会调用 probe 以及如何调用的
+最开始也只是为了弄清 log 中多出来的一次 probe 调用日志信息而已
+代码分析木有使用多长时间，结果写出来居然花了 n 天时间进行整理 #- -（文档能力啊…… #- - 软肋中的软肋！）
+好歹给自己留一个小小的 summary 吧
+
+简单地说，就是通过 bus_register 在 kernel 中注册一个子系统，然后通过 driver_register、device_register 分别将 driver、devices 挂到该 bus 相应的 kset 和 klist 上，并将 devices 和 driver 做了 bound，从而在以后调用 device 时便可以知道直接使用哪个 driver 和 driver 可以操作哪些 devices。
+这就是目前理解的一个子系统的大致框架
+
+关于 probe 的调用：
+1. bus_register 不会调用 probe（只在 kernel 中注册一个 bus）
+2. 在 driver_register 时会调用 probe 函数来判定该 driver 是否能正常工作
+3. 在 device_register 时会调用 probe 函数来判定该 driver 是否能使该 device 正常工作
+
+读内核代码如何快速筛选我们需要跟进的函数：
+1. 内核函数命名很规范，所以可以直接从函数名做初步筛选哪些函数是我们需要分析的
+2. 内核代码中的变量命名也很规范，有时能很好的提示（如 drivers_autoprobe）
+3. 内核代码注释会说明函数的功能，以及注意事项，可以大大降低代码阅读时的难度
+
+有时发现自己挺健忘的，所以备注于此
+
