@@ -1,0 +1,95 @@
+/**
+ * =====================================================================================
+ *
+ *       Filename:  linux设备模型初探-probe是如何被调用的（3）
+ *
+ *    Description:  driver_register 时 probe 是如何被调用的
+ *
+ *        Version:  1.0
+ *        Created:  02/11/2012 03:28:57 PM
+ *       Revision:  none
+ *       Compiler:  gcc
+ *
+ *         Author:  yjl (scorpionfish), scorpionfish.yjl@gmail.com
+ *                  https://github.com/scorpionfish/scorpionfish_blog
+ *        Company:  
+ *
+ * =====================================================================================
+ */
+
+分析完 bus_register 可得，driver_register 肯定会调用 probe，那接着看 driver_register 是如何调用 probe 的
+
+/**
+ * driver_register - register driver with bus
+ * @drv: driver to register
+ *
+ * We pass off most of the work to the bus_add_driver() call,
+ * since most of the things we have to do deal with the bus
+ * structures.
+ */
+int driver_register(struct device_driver *drv)
+
+函数并不长，除过对初始化的宏、变量赋值等操作之外，就只剩下以下三个函数了：
+driver_find(drv->name, drv->bus);
+bus_add_driver(drv);
+driver_add_groups(drv, drv->groups);
+
+从函数名可以先过滤一遍： driver_find 应该使用了查找某个 driver 的（可能不会调用 probe），bus_add_driver 应该是将 driver 挂到 bus 的 drivers_kset 中（很可能会调用 probe 来匹配该 driver 能操作的 device）
+OK，就从最有可能的函数入手
+
+/**
+ * bus_add_driver - Add a driver to the bus.
+ * @drv: driver.
+ */
+int bus_add_driver(struct device_driver *drv)
+
+依然直接跳过初始化宏和变量赋值操作
+klist_init(&priv->klist_devices, NULL, NULL);	// 
+kobject_init_and_add(&priv->kobj, &driver_ktype, NULL, "%s", drv->name);	// initialize a kobject structure and add it to the kobject hierarchy
+
+接着往下一扫：drivers_autoprobe …… 莫非胜利就在眼前？
+if (drv->bus->p->drivers_autoprobe) {
+	error = driver_attach(drv);
+	if (error)
+		goto out_unregister;
+}
+
+==，这个 drivers_autoprobe 在哪儿设置的？ 往回翻，看 subsys_private 结构体内的 unsigned int drivers_autoprobe:1;
+接下来的 driver_attach 就成了重点跟踪目标，go
+
+/**
+ * driver_attach - try to bind driver to devices.
+ * @drv: driver.
+ *
+ * Walk the list of devices that the bus has on it and try to
+ * match the driver with each one.  If driver_probe_device()
+ * returns 0 and the @dev->driver is set, we've found a
+ * compatible pair.
+ */
+int driver_attach(struct device_driver *drv)
+{
+	return bus_for_each_dev(drv->bus, NULL, drv, __driver_attach);
+}
+只有一个函数调用，直接跟进…… 
+?? bus_for_each_dev 函数内除了 klist_devices 相关操作之外，就只剩下一个 error = fn(dev, data); 了， fn 是哪儿来的？
+其实这儿的 fn 就是 __driver_attach，这个函数里面是啥操作？要一探究竟
+
+driver_probe_device(drv, dev);
+山穷水尽疑无路，柳暗花明又一村！一眼就瞅到这个函数了，应给就是这儿跑不掉了！（不过究竟是不是，还需要进一步跟进去看看）
+ret = really_probe(dev, drv);
+看到这个函数名，立马感觉离胜利仅一步之遥了吧！不过即使这一步之遥，有时候也可能功亏一篑，所以继续跟进
+
+if (dev->bus->probe) {
+	ret = dev->bus->probe(dev);
+	if (ret)
+		goto probe_failed;
+} else if (drv->probe) {
+	ret = drv->probe(dev);
+	if (ret)
+		goto probe_failed;
+}
+看到这儿，不用多说了，很明显已经找到调用 probe 的真凶了！
+只是这儿需要先判定该 bus 通用的 probe，然后再判定 driver 的 probe，究竟是哪一个呢？（这个就要问你自己了撒）
+log 中打印两次 probe 信息的问题终于搞定，不过好奇之下，继续看看 device_register 是否也会调用 probe
+
+

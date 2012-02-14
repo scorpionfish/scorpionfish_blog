@@ -1,0 +1,53 @@
+/**
+ * =====================================================================================
+ *
+ *       Filename:  linux设备模型初探-probe是如何被调用的（1）
+ *    Description:  
+ *
+ *        Version:  1.0
+ *        Created:  02/10/2012 11:36:29 PM
+ *       Revision:  none
+ *       Compiler:  gcc
+ *
+ *         Author:  yjl (scorpionfish), scorpionfish.yjl@gmail.com
+ *                  https://github.com/scorpionfish/scorpionfish_blog
+ *        Company:  
+ *
+ * =====================================================================================
+ */
+
+过完年回来更换了小组，也更换了工作内容，需要阅读相关的驱动代码，弄清这部分是如何被加载的。
+由于木有办法动态跟踪调试, 所以只有在代码中添加 log 输出信息 -> 编译、烧写 -> 运行，获取生成的日志，并进行分析，周而复始……
+  1. 不能使用 kgdb 调试内核（为了保证和真实的用户环境保持一致，所以不允许添加 KGDB 等等相关的选项，更不能双机联调 #- -）
+  2. 木有提供 ice debug 用的 patch（默认的 -O2 甚至 -O3 的编译选项，要用 ice 跟进去，大部分都得分析汇编…… ，而且修改优化参数将导致与真实环境不一致 #- -）
+  3. 函数入口、出口 hook 输出 log，会直接造成信息淹没…… 
+
+无奈还是赶紧开工吧：加debug打印信息 -> 编译 -> 烧写 -> 运行 -> 取 log 分析
+恨只恨自个儿当时在看《linux device drivers》时直接跳过了 Linux设备模型 这一章…… #- -
+不过好在一大哥写了个 Macro，根据 log 信息的时序生成一张调用关系图，大大方便了 log 分析，只是这大哥的 Macro 只能在他的一款编辑器里运行，而且还是 windows 环境下的……（有时间应该将这个宏读一读，用 c 重新实现，以便在 linux 下使用，不过此乃后话也）
+
+看调用关系图时，发现模块初始化时，代码中只调用了一次 probe，图中却出现了两次…… why ? 莫非是自己添加 debug 信息时多添加了？或是编译时的问题？
+重新确认添加的 debug 输出木有问题，于是再次编译、烧写、运行、取 log 分析…… 结果依旧 #- -
+怀疑镜像是否正确烧写进板子了，于是在此基础上再次增添额外的 debug 输出，结果…… 结果表明，额外的 log 信息被打印，而且 probe 信息依旧是两次……
+此举无果，无奈之下只能先保留此疑问，继续浏览 log
+
+驱动实现了一个子系统，即：单独实现了该驱动模块独有的 bus， driver、device 也重新做了 wrap
+系统启动时，先将自有的 bus 以及 driver 注册到系统（即如下的 xxxx_init 中所示），之后等到加载 omap4 时，由 omap4 发起对 device 的 probe 以及通过 platform、i2c、v4l2 子系统进行相应的 set 等操作（ms 木有说清楚啊 #- - 不过此部分不在本文讨论之列，暂不详述）
+static int __init xxxx_init(void)
+{
+	bus_register();		// 将模块独有的 bus
+	driver_register();
+	xxxx_probe();
+	……
+}
+也就是说，在 xxxx_init 中，除过 xxxx_probe 之外，在 bus_register 和 driver_register 之间必有一个也调用了 probe，究竟哪一个才是“真凶”？
+
+为了弄清 bus, driver, device 在 register 时是否会调用相关的 probe，以及如何调用的，接下来逐个跟踪
+int bus_register(struct bus_type *bus);			/* drivers/base/bus.c */
+int driver_register(struct device_driver *drv);		/* drivers/base/driver.c */
+int device_register(struct device *dev);		/* drivers/base/core.c */
+
+ps:
+前几天刚更新了系统（emerge --update --newuse --deep --with-bdeps=y @world && revdep-rebuild）, kernel 更新到 3.2.5（这内核更新速度，怎一个“神速”了得啊），所以直接拿 kernel 3.2.5 为例进行分析.
+
+

@@ -1,0 +1,98 @@
+/**
+ * =====================================================================================
+ *
+ *       Filename:  linux设备模型初探-probe是如何被调用的（2）
+ *
+ *    Description:  bus_register 时 probe 是否会被调用
+ *
+ *        Version:  1.0
+ *        Created:  02/11/2012 11:06:29 AM
+ *       Revision:  none
+ *       Compiler:  gcc
+ *
+ *         Author:  yjl (scorpionfish), scorpionfish.yjl@gmail.com
+ *                  https://github.com/scorpionfish/scorpionfish_blog
+ *        Company:  
+ *
+ * =====================================================================================
+ */
+
+我们先来看看 bus_register 吧。
+为啥要先从 bus_register 看起，而不是 driver_register 亦或是 device_register ？
+一来，在（1）中提到的 static int __init xxxx_init(void) 函数中，先调用的 bus_register ()，这样结合调用关系图看起来也灰常直观。
+ldd3 中如是说：总线是处理器与一个或者多个设备之间的通道。
+更重要的是，drivers 和 devices 都是挂到 bus 上的（这么说不知道是否贴切，暂且这么叫吧）
+
+/**
+ * bus_register - register a bus with the system.
+ * @bus: bus.
+ *
+ * Once we have that, we registered the bus with the kobject
+ * infrastructure, then register the children subsystems it has:
+ * the devices and drivers that belong to the bus.
+ */
+int bus_register(struct bus_type *bus)
+
+从函数声明中可以看到， bus_register 要处理的是 bus_type 类型的结构，在 ldd3 中（也就是 kernel 2.6.10）所描述的 bus_type 如下：
+struct bus_type {
+	char *name;
+	struct subsystem subsys;
+	struct kset drivers;
+	struct kset devices;
+	int (*match) (struct device *dev, struct device_driver *drv);
+	struct device *(*add) (struct device *dev, char **envp,	int num_envp, char *buffer, int buffer_size);
+	/* ... */
+};
+其中，可以明显看到两个 kset： 一个 drivers 表示总线上的驱动程序（该总线支持哪些驱动），一个 devices 表示总线上挂载的所有设备。
+而在 gentoo kernel 3.2.5 中，bus_type 定义如下：
+struct bus_type {
+	const char		*name;
+	struct bus_attribute	*bus_attrs;
+	struct device_attribute	*dev_attrs;	/* interface for exporting device attributes */
+	struct driver_attribute	*drv_attrs;	/* sysfs interface for exporting driver attributes */
+	struct subsys_private *p;
+
+	int (*match)(struct device *dev, struct device_driver *drv);
+	int (*probe)(struct device *dev);
+	/* ... */
+};
+？？等等， drivers、devices 的 kset 哪儿去了？难道 3.2.5 不需要这两个 kset 了？
+非也非也！仔细看看这几个结构体就知道是肿么回事儿了（在 2.6.36之后【具体哪个版本的内核开始进行如此修改，木有挨个考证啊】，就已经将一些变量重新进行了封装）
+/**
+ * struct subsys_private - structure to hold the private to the driver core portions of the bus_type/class structure.
+ */
+struct subsys_private {
+	struct kset subsys;
+	struct kset *devices_kset;	/* devices 更名为 devices_kset */
+	struct kset *drivers_kset;	/* drivers 更名为 drivers_kset */
+	struct klist klist_devices;
+	struct klist klist_drivers;
+	unsigned int drivers_autoprobe:1;
+	struct bus_type *bus;
+	/* ... */
+};
+原来这两个 kset 已经被封装到 subsys_private 里了，而且添加了两个 klist（内核遍历链表之用）。
+突然想起自个儿刚开始看 ldd3 做练习时，参考书上的方法写的例子代码都编译不了的问题，那个郁闷啊……
+而且之前做一个灰常简单的驱动移植，在其他机器上死活加载不了（跟踪调试才发现，俺自己的机器已更新到最新的内核，并以此为蓝本移植，而其他机器忘了更新内核…… #- -）
+一定要引以为戒！
+
+扯的有点儿远了……好了，言归正传，继续看 bus_register
+函数中内存分配、直接进行的赋值操作等，一眼就可以确认不会调用 probe，所以直接跳过。
+
+BLOCKING_INIT_NOTIFIER_HEAD(&priv->bus_notifier);	//驱动中会经常遇到这样的宏定义，用来初始化一个链表
+kobject_set_name(&priv->subsys.kobj, "%s", bus->name);	// Set the name of a kobject，此处设置该子系统 kobj 的 name
+kset_register(&priv->subsys);		// initialize and add a kset
+bus_create_file(bus, &bus_attr_uevent);	// 跟进去会发现只是掉用 sysfs_create_file 函数，在 sysfs 中创建了一个该 obj 的属性文件，便于 user 访问
+kset_create_and_add("devices", NULL, &priv->subsys.kobj);	// create a struct kset dynamically and add it to sysfs
+kset_create_and_add("drivers", NULL, &priv->subsys.kobj);	// 
+klist_init(&priv->klist_devices, klist_devices_get, klist_devices_put);	// 初始化 klist_devices 链表（subsys_private 结构体内）
+klist_init(&priv->klist_drivers, NULL, NULL);				// 初始化 drivers 的链表 klist_drivers
+
+接下来看最后海剩下的两个函数：
+add_probe_files(bus);
+跟进 add_probe_files 发现，只是调用 bus_create_file 在 sysfs 中创建文件而已，并没有引起 probe 的真正调用。
+bus_add_attrs(bus);	// Add default attributes for this bus.
+
+可以得知：bus_register 在系统中注册了一个 bus，并对其所属的 devices 和 drivers 链表等进行了 init 初始化，创建 sysfs 中的属性文件等，并不会引起 probe 函数调用。那么很明显，另一次 probe 就是在 driver_register 中被调用的了！
+
+
